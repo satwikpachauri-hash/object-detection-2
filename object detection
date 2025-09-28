@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Teachable Machine - Watch / Pen</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, Arial; margin: 24px; text-align:center; background:#fafafa; color:#111 }
+    h1 { margin-bottom: 12px; font-size:20px }
+    #controls { margin-bottom:12px }
+    #canvas-container { position:relative; width:500px; height:500px; margin:0 auto; border:1px solid #ccc; background:#000 }
+    canvas, video { display:block; }
+    button { padding:10px 14px; font-size:14px; cursor:pointer }
+    #message { margin-top:10px; font-size:13px; color:#666 }
+  </style>
+</head>
+<body>
+  <h1>Teachable Machine Object Recognition</h1>
+  <div id="controls">
+    <button id="startBtn">Start Camera</button>
+  </div>
+
+  <div id="canvas-container"></div>
+  <div id="message"></div>
+
+  <!-- TensorFlow and Teachable Machine image library -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+
+  <script>
+    // MODEL URL
+    const URL = "https://teachablemachine.withgoogle.com/models/JqU6SEonV/";
+
+    let model, webcam, maxPredictions;
+    let overlayCanvas, overlayCtx;
+    let running = false;
+    const container = document.getElementById('canvas-container');
+    const startBtn = document.getElementById('startBtn');
+    const msg = document.getElementById('message');
+
+    startBtn.addEventListener('click', init);
+
+    async function init() {
+      if (running) return;
+      running = true;
+      startBtn.disabled = true;
+      startBtn.innerText = 'Starting...';
+      msg.innerText = '';
+
+      try {
+        // load model
+        const modelURL = URL + "model.json";
+        const metadataURL = URL + "metadata.json";
+        model = await tmImage.load(modelURL, metadataURL);
+        maxPredictions = model.getTotalClasses();
+
+        // setup webcam (500x500)
+        const flip = true;
+        webcam = new tmImage.Webcam(500, 500, flip);
+        await webcam.setup();         // request camera permissions
+        await webcam.play();          // start the webcam
+      } catch (e) {
+        msg.innerText = 'Camera or model load failed. Allow camera and retry.';
+        console.error(e);
+        startBtn.disabled = false;
+        startBtn.innerText = 'Start Camera';
+        running = false;
+        return;
+      }
+
+      // clear container and append webcam canvas
+      container.innerHTML = '';
+      container.appendChild(webcam.canvas);
+
+      // create overlay canvas (same size) for text
+      overlayCanvas = document.createElement('canvas');
+      overlayCanvas.width = 500;
+      overlayCanvas.height = 500;
+      overlayCanvas.style.position = 'absolute';
+      overlayCanvas.style.left = '0';
+      overlayCanvas.style.top = '0';
+      overlayCanvas.style.pointerEvents = 'none';
+      container.appendChild(overlayCanvas);
+      overlayCtx = overlayCanvas.getContext('2d');
+
+      startBtn.innerText = 'Camera running';
+      msg.innerText = 'Model loaded. Showing label when confident detection occurs.';
+
+      window.requestAnimationFrame(loop);
+    }
+
+    async function loop() {
+      if (!running) return;
+      webcam.update(); // update the webcam frame
+      await predict();
+      window.requestAnimationFrame(loop);
+    }
+
+    async function predict() {
+      // model.predict accepts canvas element
+      const predictions = await model.predict(webcam.canvas);
+
+      // find highest probability
+      let top = {className: '', probability: 0};
+      for (let p of predictions) {
+        if (p.probability > top.probability) top = p;
+      }
+
+      // draw overlay
+      overlayCtx.clearRect(0,0,overlayCanvas.width, overlayCanvas.height);
+
+      // only show when confident
+      const THRESH = 0.60;
+      if (top.probability > THRESH) {
+        const label = top.className.toLowerCase();
+        let text = top.className; // fallback
+        if (label.includes('watch')) text = 'Watch';
+        else if (label.includes('class 2') || label.includes('pen')) text = 'Pen';
+
+        // draw a semi-transparent bar and the text
+        const barHeight = 52;
+        overlayCtx.fillStyle = 'rgba(0,0,0,0.55)';
+        overlayCtx.fillRect(0, overlayCanvas.height - barHeight, overlayCanvas.width, barHeight);
+
+        overlayCtx.font = 'bold 30px system-ui, Arial';
+        overlayCtx.fillStyle = '#fff';
+        overlayCtx.textAlign = 'center';
+        overlayCtx.textBaseline = 'middle';
+        overlayCtx.fillText(text, overlayCanvas.width / 2, overlayCanvas.height - barHeight/2);
+      }
+    }
+  </script>
+</body>
+</html>
