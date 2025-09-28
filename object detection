@@ -2,133 +2,241 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Teachable Machine - Watch / Pen</title>
+  <title>Teachable Machine — Watch / Pen</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
-    body { font-family: system-ui, Arial; margin: 24px; text-align:center; background:#fafafa; color:#111 }
-    h1 { margin-bottom: 12px; font-size:20px }
-    #controls { margin-bottom:12px }
-    #canvas-container { position:relative; width:500px; height:500px; margin:0 auto; border:1px solid #ccc; background:#000 }
-    canvas, video { display:block; }
-    button { padding:10px 14px; font-size:14px; cursor:pointer }
-    #message { margin-top:10px; font-size:13px; color:#666 }
+    body{font-family:system-ui, Arial; margin:28px; text-align:center; color:#111; background:#f7f7f7}
+    h1{margin:0 0 12px;font-size:20px}
+    #controls{margin:14px 0}
+    button,input[type=file]{padding:10px 12px;margin:0 6px;font-size:14px}
+    #canvas-container{width:500px;height:500px;margin:12px auto;position:relative;border:1px solid #ddd;background:#000}
+    canvas,video,img{display:block;width:500px;height:500px;object-fit:cover}
+    #message{font-size:13px;color:#555;margin-top:8px}
   </style>
 </head>
 <body>
-  <h1>Teachable Machine Object Recognition</h1>
+  <h1>Teachable Machine — Watch / Pen</h1>
+
   <div id="controls">
     <button id="startBtn">Start Camera</button>
+    <button id="demoBtn">Use Demo Image</button>
+    <input id="upload" type="file" accept="image/*" />
   </div>
 
   <div id="canvas-container"></div>
-  <div id="message"></div>
+  <div id="message">Tip: click Start Camera and allow camera access. If it fails, upload an image or use demo mode.</div>
 
-  <!-- TensorFlow and Teachable Machine image library -->
+  <!-- libs -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
 
   <script>
-    // MODEL URL
-    const URL = "https://teachablemachine.withgoogle.com/models/JqU6SEonV/";
+    const MODEL_URL = "https://teachablemachine.withgoogle.com/models/JqU6SEonV/";
+    const SIZE = 500;
+    const THRESH = 0.55; // show label above this confidence
 
-    let model, webcam, maxPredictions;
+    let model = null;
+    let webcam = null;
     let overlayCanvas, overlayCtx;
     let running = false;
+    let predictionLoopTimer = null;
     const container = document.getElementById('canvas-container');
     const startBtn = document.getElementById('startBtn');
+    const demoBtn = document.getElementById('demoBtn');
+    const upload = document.getElementById('upload');
     const msg = document.getElementById('message');
 
-    startBtn.addEventListener('click', init);
+    startBtn.addEventListener('click', startCamera);
+    demoBtn.addEventListener('click', useDemoImage);
+    upload.addEventListener('change', uploadImage);
 
-    async function init() {
-      if (running) return;
-      running = true;
-      startBtn.disabled = true;
-      startBtn.innerText = 'Starting...';
-      msg.innerText = '';
-
+    // load model once
+    async function loadModel() {
+      if (model) return model;
       try {
-        // load model
-        const modelURL = URL + "model.json";
-        const metadataURL = URL + "metadata.json";
+        const modelURL = MODEL_URL + "model.json";
+        const metadataURL = MODEL_URL + "metadata.json";
         model = await tmImage.load(modelURL, metadataURL);
-        maxPredictions = model.getTotalClasses();
-
-        // setup webcam (500x500)
-        const flip = true;
-        webcam = new tmImage.Webcam(500, 500, flip);
-        await webcam.setup();         // request camera permissions
-        await webcam.play();          // start the webcam
+        return model;
       } catch (e) {
-        msg.innerText = 'Camera or model load failed. Allow camera and retry.';
-        console.error(e);
-        startBtn.disabled = false;
-        startBtn.innerText = 'Start Camera';
-        running = false;
-        return;
+        console.error('Model load failed', e);
+        throw e;
       }
+    }
 
-      // clear container and append webcam canvas
+    function clearContainer() {
+      // stop any loop
+      running = false;
+      if (predictionLoopTimer) { clearTimeout(predictionLoopTimer); predictionLoopTimer = null; }
+      // release webcam if present
+      if (webcam && webcam.webcam && webcam.webcam.srcObject) {
+        try {
+          webcam.webcam.srcObject.getTracks().forEach(t => t.stop());
+        } catch (e) {}
+      }
+      webcam = null;
       container.innerHTML = '';
-      container.appendChild(webcam.canvas);
+    }
 
-      // create overlay canvas (same size) for text
+    function createOverlay() {
       overlayCanvas = document.createElement('canvas');
-      overlayCanvas.width = 500;
-      overlayCanvas.height = 500;
+      overlayCanvas.width = SIZE;
+      overlayCanvas.height = SIZE;
       overlayCanvas.style.position = 'absolute';
       overlayCanvas.style.left = '0';
       overlayCanvas.style.top = '0';
       overlayCanvas.style.pointerEvents = 'none';
       container.appendChild(overlayCanvas);
       overlayCtx = overlayCanvas.getContext('2d');
-
-      startBtn.innerText = 'Camera running';
-      msg.innerText = 'Model loaded. Showing label when confident detection occurs.';
-
-      window.requestAnimationFrame(loop);
     }
 
-    async function loop() {
-      if (!running) return;
-      webcam.update(); // update the webcam frame
-      await predict();
-      window.requestAnimationFrame(loop);
-    }
-
-    async function predict() {
-      // model.predict accepts canvas element
-      const predictions = await model.predict(webcam.canvas);
-
-      // find highest probability
-      let top = {className: '', probability: 0};
-      for (let p of predictions) {
-        if (p.probability > top.probability) top = p;
+    async function startCamera() {
+      startBtn.disabled = true;
+      msg.innerText = 'Loading model and trying to access camera...';
+      try {
+        await loadModel();
+      } catch (e) {
+        msg.innerText = 'Model failed to load. Check console.';
+        startBtn.disabled = false;
+        return;
       }
 
-      // draw overlay
+      clearContainer();
+
+      try {
+        webcam = new tmImage.Webcam(SIZE, SIZE, true);
+        await webcam.setup(); // may prompt for camera
+        await webcam.play();
+        container.appendChild(webcam.canvas);
+        createOverlay();
+        running = true;
+        msg.innerText = 'Camera started. Detecting...';
+        runPredictLoop('webcam');
+      } catch (e) {
+        console.error('Camera start failed', e);
+        msg.innerText = 'Camera access denied or not available. Use Upload or Demo mode below.';
+        startBtn.disabled = false;
+      }
+    }
+
+    // Demo: generate a simple placeholder image (user can upload real images)
+    function useDemoImage() {
+      clearContainer();
+      // make a demo image via canvas
+      const demoImg = document.createElement('canvas');
+      demoImg.width = SIZE;
+      demoImg.height = SIZE;
+      const dctx = demoImg.getContext('2d');
+      dctx.fillStyle = '#ffffff';
+      dctx.fillRect(0,0,SIZE,SIZE);
+      dctx.fillStyle = '#222';
+      dctx.font = 'bold 36px system-ui, Arial';
+      dctx.textAlign = 'center';
+      dctx.textBaseline = 'middle';
+      dctx.fillText('Demo image', SIZE/2, SIZE/2 - 20);
+      dctx.font = '18px system-ui, Arial';
+      dctx.fillText('Upload a real image to test', SIZE/2, SIZE/2 + 18);
+
+      const img = document.createElement('img');
+      img.src = demoImg.toDataURL('image/png');
+      img.width = SIZE;
+      img.height = SIZE;
+      container.appendChild(img);
+      createOverlay();
+      msg.innerText = 'Demo image loaded. Predictions will run on this static image.';
+      runPredictLoop('image', img);
+    }
+
+    function uploadImage(e) {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      clearContainer();
+      const img = document.createElement('img');
+      img.width = SIZE;
+      img.height = SIZE;
+      img.style.objectFit = 'cover';
+      img.onload = () => {
+        container.appendChild(img);
+        createOverlay();
+        msg.innerText = 'Uploaded image loaded. Detecting...';
+        runPredictLoop('image', img);
+      };
+      img.onerror = () => {
+        msg.innerText = 'Could not load image. Try another file.';
+      };
+      img.src = URL.createObjectURL(file);
+    }
+
+    // mode: 'webcam' uses webcam.canvas, 'image' uses provided img element
+    async function runPredictLoop(mode, imgElement=null) {
+      if (!model) {
+        try { await loadModel(); } catch (e) { msg.innerText = 'Model load error'; return; }
+      }
+      running = true;
+
+      async function step() {
+        if (!running) return;
+        try {
+          let source;
+          if (mode === 'webcam') {
+            webcam.update();
+            source = webcam.canvas;
+          } else {
+            source = imgElement;
+          }
+
+          const predictions = await model.predict(source);
+          drawPrediction(predictions);
+        } catch (e) {
+          console.error('Predict error', e);
+          msg.innerText = 'Prediction error. See console.';
+          running = false;
+          return;
+        }
+        // throttle predictions to ~6 fps
+        predictionLoopTimer = setTimeout(step, 160);
+      }
+
+      step();
+    }
+
+    function drawPrediction(predictions) {
+      // clear overlay
       overlayCtx.clearRect(0,0,overlayCanvas.width, overlayCanvas.height);
 
-      // only show when confident
-      const THRESH = 0.60;
-      if (top.probability > THRESH) {
-        const label = top.className.toLowerCase();
-        let text = top.className; // fallback
-        if (label.includes('watch')) text = 'Watch';
-        else if (label.includes('class 2') || label.includes('pen')) text = 'Pen';
+      // find top prediction
+      let top = predictions[0];
+      for (let p of predictions) if (p.probability > top.probability) top = p;
 
-        // draw a semi-transparent bar and the text
-        const barHeight = 52;
-        overlayCtx.fillStyle = 'rgba(0,0,0,0.55)';
-        overlayCtx.fillRect(0, overlayCanvas.height - barHeight, overlayCanvas.width, barHeight);
-
-        overlayCtx.font = 'bold 30px system-ui, Arial';
-        overlayCtx.fillStyle = '#fff';
-        overlayCtx.textAlign = 'center';
-        overlayCtx.textBaseline = 'middle';
-        overlayCtx.fillText(text, overlayCanvas.width / 2, overlayCanvas.height - barHeight/2);
+      if (!top || top.probability < THRESH) {
+        // low confidence - optional: show nothing
+        return;
       }
+
+      // map labels to display text
+      let label = top.className.toLowerCase();
+      let display = top.className;
+      if (label.includes('watch')) display = 'Watch';
+      else if (label.includes('class 2') || label.includes('pen')) display = 'Pen';
+
+      // draw bottom bar + text
+      const barH = 52;
+      overlayCtx.fillStyle = 'rgba(0,0,0,0.6)';
+      overlayCtx.fillRect(0, overlayCanvas.height - barH, overlayCanvas.width, barH);
+      overlayCtx.font = 'bold 26px system-ui, Arial';
+      overlayCtx.fillStyle = '#fff';
+      overlayCtx.textAlign = 'center';
+      overlayCtx.textBaseline = 'middle';
+      overlayCtx.fillText(display + '  (' + (top.probability*100).toFixed(0) + '%)', overlayCanvas.width/2, overlayCanvas.height - barH/2);
     }
+
+    // cleanup on unload
+    window.addEventListener('beforeunload', () => {
+      if (webcam && webcam.webcam && webcam.webcam.srcObject) {
+        try { webcam.webcam.srcObject.getTracks().forEach(t => t.stop()); } catch(e){}
+      }
+    });
   </script>
 </body>
 </html>
+
